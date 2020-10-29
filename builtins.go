@@ -270,3 +270,21 @@ func asFloat(param string) (float64, error) {
 	}
 	return i, nil
 }
+
+// nonnil validates that the given pointer is not nil
+func nonnil(v interface{}, param string) error {
+	st := reflect.ValueOf(v)
+	// if we got a non-pointer then we most likely got
+	// the value for a pointer field, either way, its not
+	// nil
+	switch st.Kind() {
+	case reflect.Ptr, reflect.Interface:
+		if st.IsNil() {
+			return ErrZeroValue
+		}
+	case reflect.Invalid:
+		// the only way its invalid is if its an interface that's nil
+		return ErrZeroValue
+	}
+	return nil
+}

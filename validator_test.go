@@ -17,7 +17,10 @@
 package validator_test
 
 import (
+	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
 	. "gopkg.in/check.v1"
@@ -44,17 +47,25 @@ type Impl struct {
 	F string `validate:"len=3"`
 }
 
-func (this *Impl) Foo() string {
-	return this.F
+func (i *Impl) Foo() string {
+	return i.F
+}
+
+type Impl2 struct {
+	F string `validate:"len=3"`
+}
+
+func (i Impl2) Foo() string {
+	return i.F
 }
 
 type TestStruct struct {
-	A   int    `validate:"nonzero"`
+	A   int    `validate:"nonzero" json:"a"`
 	B   string `validate:"len=8,min=6,max=4"`
 	Sub struct {
-		A int `validate:"nonzero"`
+		A int `validate:"nonzero" json:"sub_a"`
 		B string
-		C float64 `validate:"nonzero,min=1"`
+		C float64 `validate:"nonzero,min=1" json:"c_is_a_float"`
 		D *string `validate:"nonzero"`
 	}
 	D *Simple `validate:"nonzero"`
@@ -200,7 +211,7 @@ func (ms *MySuite) TestValidString(c *C) {
 	c.Assert(err, IsNil)
 
 	err = validator.Valid(s, "regexp=^.*[0-9]{5}$")
-	c.Assert(errs, NotNil)
+	c.Assert(err, NotNil)
 
 	err = validator.Valid("", "nonzero,len=3,max=1")
 	c.Assert(err, NotNil)
@@ -318,15 +329,24 @@ func (ms *MySuite) TestValidatePointerVar(c *C) {
 		A *string `validate:"min=6"`
 		B *int    `validate:"len=7"`
 		C *int    `validate:"min=12"`
+		D *int    `validate:"nonzero"`
+		E *int    `validate:"nonzero"`
+		F *int    `validate:"nonnil"`
+		G *int    `validate:"nonnil"`
 	}
 	s := "aaa"
 	b := 8
-	err = validator.Validate(&test7{&s, &b, nil})
+	e := 0
+	err = validator.Validate(&test7{&s, &b, nil, nil, &e, &e, nil})
 	errs, ok = err.(validator.ErrorMap)
 	c.Assert(ok, Equals, true)
 	c.Assert(errs["A"], HasError, validator.ErrMin)
 	c.Assert(errs["B"], HasError, validator.ErrLen)
-	c.Assert(errs["C"], Not(HasError), validator.ErrMin)
+	c.Assert(errs["C"], IsNil)
+	c.Assert(errs["D"], HasError, validator.ErrZeroValue)
+	c.Assert(errs["E"], HasError, validator.ErrZeroValue)
+	c.Assert(errs["F"], IsNil)
+	c.Assert(errs["G"], HasError, validator.ErrZeroValue)
 }
 
 func (ms *MySuite) TestValidateOmittedStructVar(c *C) {
@@ -495,6 +515,256 @@ func (ms *MySuite) TestTagEscape(c *C) {
 	errs, ok := err.(validator.ErrorMap)
 	c.Assert(ok, Equals, true)
 	c.Assert(errs["A"], HasError, validator.ErrRegexp)
+}
+
+func (ms *MySuite) TestEmbeddedFields(c *C) {
+	type baseTest struct {
+		A string `validate:"min=1"`
+	}
+	type test struct {
+		baseTest
+		B string `validate:"min=1"`
+	}
+
+	err := validator.Validate(test{})
+	c.Assert(err, NotNil)
+	errs, ok := err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs, HasLen, 2)
+	c.Assert(errs["baseTest.A"], HasError, validator.ErrMin)
+	c.Assert(errs["B"], HasError, validator.ErrMin)
+
+	type test2 struct {
+		baseTest `validate:"-"`
+	}
+	err = validator.Validate(test2{})
+	c.Assert(err, IsNil)
+}
+
+func (ms *MySuite) TestEmbeddedPointerFields(c *C) {
+	type baseTest struct {
+		A string `validate:"min=1"`
+	}
+	type test struct {
+		*baseTest
+		B string `validate:"min=1"`
+	}
+
+	err := validator.Validate(test{baseTest: &baseTest{}})
+	c.Assert(err, NotNil)
+	errs, ok := err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs, HasLen, 2)
+	c.Assert(errs["baseTest.A"], HasError, validator.ErrMin)
+	c.Assert(errs["B"], HasError, validator.ErrMin)
+}
+
+func (ms *MySuite) TestEmbeddedNilPointerFields(c *C) {
+	type baseTest struct {
+		A string `validate:"min=1"`
+	}
+	type test struct {
+		*baseTest
+	}
+
+	err := validator.Validate(test{})
+	c.Assert(err, IsNil)
+}
+
+func (ms *MySuite) TestPrivateFields(c *C) {
+	type test struct {
+		b string `validate:"min=1"`
+	}
+
+	err := validator.Validate(test{})
+	c.Assert(err, IsNil)
+}
+
+func (ms *MySuite) TestEmbeddedUnexported(c *C) {
+	type baseTest struct {
+		A string `validate:"min=1"`
+	}
+	type test struct {
+		baseTest `validate:"nonnil"`
+	}
+
+	err := validator.Validate(test{})
+	c.Assert(err, NotNil)
+	errs, ok := err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs, HasLen, 2)
+	c.Assert(errs["baseTest"], HasError, validator.ErrCannotValidate)
+	c.Assert(errs["baseTest.A"], HasError, validator.ErrMin)
+}
+
+func (ms *MySuite) TestValidateStructWithByteSliceSlice(c *C) {
+	type test struct {
+		Slices [][]byte `validate:"len=1"`
+	}
+
+	t := test{
+		Slices: [][]byte{[]byte(``)},
+	}
+	err := validator.Validate(t)
+	c.Assert(err, IsNil)
+}
+
+func (ms *MySuite) TestEmbeddedInterface(c *C) {
+	type test struct {
+		I
+	}
+
+	err := validator.Validate(test{Impl2{"hello"}})
+	c.Assert(err, NotNil)
+	errs, ok := err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs, HasLen, 1)
+	c.Assert(errs["I.F"], HasError, validator.ErrLen)
+
+	err = validator.Validate(test{&Impl{"hello"}})
+	c.Assert(err, NotNil)
+	errs, ok = err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs, HasLen, 1)
+	c.Assert(errs["I.F"], HasError, validator.ErrLen)
+
+	err = validator.Validate(test{})
+	c.Assert(err, IsNil)
+
+	type test2 struct {
+		I `validate:"nonnil"`
+	}
+	err = validator.Validate(test2{})
+	c.Assert(err, NotNil)
+	errs, ok = err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs, HasLen, 1)
+	c.Assert(errs["I"], HasError, validator.ErrZeroValue)
+}
+
+func (ms *MySuite) TestErrors(c *C) {
+	err := validator.ErrorMap{
+		"foo": validator.ErrorArray{
+			fmt.Errorf("bar"),
+		},
+		"baz": validator.ErrorArray{
+			fmt.Errorf("qux"),
+		},
+	}
+	sep := ", "
+	expected := "foo: bar, baz: qux"
+
+	expectedParts := strings.Split(expected, sep)
+	sort.Strings(expectedParts)
+
+	errString := err.Error()
+	errStringParts := strings.Split(errString, sep)
+	sort.Strings(errStringParts)
+
+	c.Assert(expectedParts, DeepEquals, errStringParts)
+}
+
+func (ms *MySuite) TestJSONPrint(c *C) {
+	t := TestStruct{
+		A: 0,
+	}
+	err := validator.WithPrintJSON(true).Validate(t)
+	c.Assert(err, NotNil)
+	errs, ok := err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs["A"], IsNil)
+	c.Assert(errs["a"], HasError, validator.ErrZeroValue)
+}
+
+func (ms *MySuite) TestJSONPrintOff(c *C) {
+	t := TestStruct{
+		A: 0,
+	}
+	err := validator.WithPrintJSON(false).Validate(t)
+	c.Assert(err, NotNil)
+	errs, ok := err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs["A"], HasError, validator.ErrZeroValue)
+	c.Assert(errs["a"], IsNil)
+}
+
+func (ms *MySuite) TestJSONPrintNoTag(c *C) {
+	t := TestStruct{
+		B: "te",
+	}
+	err := validator.WithPrintJSON(true).Validate(t)
+	c.Assert(err, NotNil)
+	errs, ok := err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs["B"], HasError, validator.ErrLen)
+}
+
+func (ms *MySuite) TestValidateSlice(c *C) {
+	type test2 struct {
+		Num    int    `validate:"max=2"`
+		String string `validate:"nonzero"`
+	}
+
+	err := validator.Validate([]test2{
+		{
+			Num:    6,
+			String: "foo",
+		},
+		{
+			Num:    1,
+			String: "foo",
+		},
+	})
+	c.Assert(err, NotNil)
+	errs, ok := err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs["[0].Num"], HasError, validator.ErrMax)
+	c.Assert(errs["[0].String"], IsNil) // sanity check
+	c.Assert(errs["[1].Num"], IsNil)    // sanity check
+	c.Assert(errs["[1].String"], IsNil) // sanity check
+}
+
+func (ms *MySuite) TestValidateMap(c *C) {
+	type test2 struct {
+		Num    int    `validate:"max=2"`
+		String string `validate:"nonzero"`
+	}
+
+	err := validator.Validate(map[string]test2{
+		"first": {
+			Num:    6,
+			String: "foo",
+		},
+		"second": {
+			Num:    1,
+			String: "foo",
+		},
+	})
+	c.Assert(err, NotNil)
+	errs, ok := err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs["[first](value).Num"], HasError, validator.ErrMax)
+	c.Assert(errs["[first](value).String"], IsNil)  // sanity check
+	c.Assert(errs["[second](value).Num"], IsNil)    // sanity check
+	c.Assert(errs["[second](value).String"], IsNil) // sanity check
+
+	err = validator.Validate(map[test2]string{
+		{
+			Num:    6,
+			String: "foo",
+		}: "first",
+		{
+			Num:    1,
+			String: "foo",
+		}: "second",
+	})
+	c.Assert(err, NotNil)
+	errs, ok = err.(validator.ErrorMap)
+	c.Assert(ok, Equals, true)
+	c.Assert(errs["[{Num:6 String:foo}](key).Num"], HasError, validator.ErrMax)
+	c.Assert(errs["[{Num:6 String:foo}](key).String"], IsNil) // sanity check
+	c.Assert(errs["[{Num:1 String:foo}](key).Num"], IsNil)    // sanity check
+	c.Assert(errs["[{Num:1 String:foo}](key).String"], IsNil) // sanity check
 }
 
 type hasErrorChecker struct {
